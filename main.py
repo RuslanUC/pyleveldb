@@ -3,6 +3,8 @@ import zlib
 from pathlib import Path
 from typing import BinaryIO
 
+from snappy import snappy
+
 
 class CRC32:
     __slots__ = ("_checksum",)
@@ -166,25 +168,77 @@ def read_manifest_file(path: Path) -> None:
                     log_number = read_varint(f, crc)
                     print(f"  [Prev log number] Log number: {log_number}")
                 else:
-                    print(f"Unknown tag: {tag}")
-                    return
+                    raise ValueError(f"Unknown tag: {tag}")
+
+
+def get_manifest_name(db_path: Path) -> str:
+    with open(db_path / "CURRENT") as f:
+        file_size = f.seek(0, os.SEEK_END)
+        if file_size != 16:
+            raise ValueError(f"Invalid leveldb database: expected CURRENT to be 16 bytes, but it's {file_size}")
+
+        f.seek(0)
+        manifest_name = f.read(15)
+
+        if f.read() != "\n":
+            raise ValueError(f"Invalid leveldb database: expected CURRENT to end with newline")
+        if not manifest_name.startswith("MANIFEST-"):
+            raise ValueError(f"Invalid leveldb database: expected CURRENT to start with \"MANIFEST-\"")
+
+        print(f"Current manifest: {manifest_name}")
+        return manifest_name
+
+
+def read_ldb_block(fp: BinaryIO, offset: int, size: int) -> None:
+    fp.seek(offset + size)
+    block_is_compressed = read_int8(fp)
+    block_data_crc = read_int32(fp)
+    print(f"  Block is compressed: {block_is_compressed}, checksum: {block_data_crc}")
+    fp.seek(offset)
+    block_data = fp.read(size)
+    if block_is_compressed:
+        block_data = snappy.uncompress(block_data)
+        print(f"  Block data: {block_data}")
+    else:
+        print(f"  Block data: {block_data}")
+
+
+def read_ldb_file(path: Path) -> None:
+    with open(path, "rb") as f:
+        f.seek(-8, os.SEEK_END)
+        magic = f.read(8)
+        if magic != b"W\xfb\x80\x8b$uG\xdb":
+            raise ValueError(f"Not a leveldb ldb file: {path}")
+
+        f.seek(-48, os.SEEK_END)
+
+        meta_idx_block_loc = read_varint(f)
+        meta_idx_block_size = read_varint(f)
+        print(f"Meta index block location: {meta_idx_block_loc}, size: {meta_idx_block_size}")
+
+        idx_block_loc = read_varint(f)
+        idx_block_size = read_varint(f)
+        print(f"Index block location: {idx_block_loc}, size: {idx_block_size}")
+
+        print("Reading index block")
+        read_ldb_block(f, idx_block_loc, idx_block_size)
+
+        print("Reading meta index block")
+        read_ldb_block(f, meta_idx_block_loc, meta_idx_block_size)
+
+        f.seek(0)
+
 
 
 def main() -> None:
     db_path = Path("ldb")
 
-    with open(db_path / "CURRENT") as f:
-        file_size = f.seek(0, os.SEEK_END)
-        assert file_size == 16
-        f.seek(0)
-        manifest_name = f.read(15)
-        assert f.read() == "\n"
-        assert manifest_name.startswith("MANIFEST-")
-        print(f"Current manifest: {manifest_name}")
-
-    read_manifest_file(db_path / manifest_name)
+    # manifest_name = get_manifest_name(db_path)
+    # read_manifest_file(db_path / manifest_name)
 
     # read_log_file(db_path / "000044.log")
+
+    read_ldb_file(db_path / "000005.ldb")
 
 
 if __name__ == "__main__":
