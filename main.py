@@ -202,18 +202,22 @@ def get_manifest_name(db_path: Path) -> str:
         return manifest_name
 
 
-def read_ldb_block(fp: BinaryIO, handle: BlockHandle, is_index: bool = False) -> None:
+def iprint(indent: int, text: str) -> None:
+    print(f"{' ' * indent}{text}")
+
+
+def read_ldb_block(fp: BinaryIO, handle: BlockHandle, is_index: bool = False, indent: int = 0) -> None:
     fp.seek(handle.offset + handle.size)
     block_is_compressed = read_int8(fp)
     block_data_crc = read_int32(fp)
-    print(f"  Block is compressed: {block_is_compressed}, checksum: {block_data_crc}")
+    iprint(indent, f"Block is compressed: {block_is_compressed}, checksum: {block_data_crc}")
     fp.seek(handle.offset)
     block_data = fp.read(handle.size)
     if block_is_compressed:
         block_data = snappy.uncompress(block_data)
-        print(f"  Block data: {block_data}")
+        iprint(indent, f"Block data: {block_data}")
     else:
-        print(f"  Block data: {block_data}")
+        iprint(indent, f"Block data: {block_data}")
 
     block_actual_size = len(block_data) - 4
 
@@ -223,7 +227,7 @@ def read_ldb_block(fp: BinaryIO, handle: BlockHandle, is_index: bool = False) ->
     block_actual_size -= restart_count * 4
     block.seek(0)
 
-    print(f"  Restart count: {restart_count}")
+    iprint(indent, f"Restart count: {restart_count}")
 
     while block.tell() < block_actual_size:
         shared_key_length = read_varint(block)
@@ -233,12 +237,15 @@ def read_ldb_block(fp: BinaryIO, handle: BlockHandle, is_index: bool = False) ->
         value = block.read(value_length)
         if is_index:
             value = BlockHandle.read(BytesIO(value))
-        print(f"  Shared len: {shared_key_length}, inline len: {inline_key_length}, inline: {inline_key}, value: {value}")
+        iprint(indent, f"Shared len: {shared_key_length}, inline len: {inline_key_length}, inline: {inline_key}, value: {value}")
+        if is_index:
+            iprint(indent, "Reading regular block")
+            read_ldb_block(fp, value, False, indent + 4)
 
     block.seek(block_actual_size)
     for restart in range(restart_count):
         restart_value = read_int32(block)
-        print(f"  Restart #{restart}: {restart_value}")
+        iprint(indent, f"Restart #{restart}: {restart_value}")
 
 
 def read_ldb_file(path: Path) -> None:
@@ -257,10 +264,10 @@ def read_ldb_file(path: Path) -> None:
         print(f"Index block handle: {idx_block_handle}")
 
         print("Reading index block")
-        read_ldb_block(f, idx_block_handle, True)
+        read_ldb_block(f, idx_block_handle, True, 2)
 
         print("Reading meta index block")
-        read_ldb_block(f, meta_idx_block_handle)
+        read_ldb_block(f, meta_idx_block_handle, indent=2)
 
         f.seek(0)
 
