@@ -1,7 +1,9 @@
+from __future__ import annotations
 import os
 import zlib
+from io import BytesIO
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, NamedTuple
 
 from snappy import snappy
 
@@ -17,6 +19,17 @@ class CRC32:
 
     def checksum(self) -> int:
         return self._checksum  # ((self._checksum >> 15) | (self._checksum << 17) + 0xa282ead8) & 0xffffffff
+
+
+class BlockHandle(NamedTuple):
+    offset: int
+    size: int
+
+    @classmethod
+    def read(cls, fp: BinaryIO) -> BlockHandle:
+        offset = read_varint(fp)
+        size = read_varint(fp)
+        return BlockHandle(offset, size)
 
 
 def read_int64(fp: BinaryIO, crc: CRC32 | None = None) -> int:
@@ -189,18 +202,43 @@ def get_manifest_name(db_path: Path) -> str:
         return manifest_name
 
 
-def read_ldb_block(fp: BinaryIO, offset: int, size: int) -> None:
-    fp.seek(offset + size)
+def read_ldb_block(fp: BinaryIO, handle: BlockHandle, is_index: bool = False) -> None:
+    fp.seek(handle.offset + handle.size)
     block_is_compressed = read_int8(fp)
     block_data_crc = read_int32(fp)
     print(f"  Block is compressed: {block_is_compressed}, checksum: {block_data_crc}")
-    fp.seek(offset)
-    block_data = fp.read(size)
+    fp.seek(handle.offset)
+    block_data = fp.read(handle.size)
     if block_is_compressed:
         block_data = snappy.uncompress(block_data)
         print(f"  Block data: {block_data}")
     else:
         print(f"  Block data: {block_data}")
+
+    block_actual_size = len(block_data) - 4
+
+    block = BytesIO(block_data)
+    block.seek(block_actual_size)
+    restart_count = read_int32(block)
+    block_actual_size -= restart_count * 4
+    block.seek(0)
+
+    print(f"  Restart count: {restart_count}")
+
+    while block.tell() < block_actual_size:
+        shared_key_length = read_varint(block)
+        inline_key_length = read_varint(block)
+        value_length = read_varint(block)
+        inline_key = block.read(inline_key_length)
+        value = block.read(value_length)
+        if is_index:
+            value = BlockHandle.read(BytesIO(value))
+        print(f"  Shared len: {shared_key_length}, inline len: {inline_key_length}, inline: {inline_key}, value: {value}")
+
+    block.seek(block_actual_size)
+    for restart in range(restart_count):
+        restart_value = read_int32(block)
+        print(f"  Restart #{restart}: {restart_value}")
 
 
 def read_ldb_file(path: Path) -> None:
@@ -212,19 +250,17 @@ def read_ldb_file(path: Path) -> None:
 
         f.seek(-48, os.SEEK_END)
 
-        meta_idx_block_loc = read_varint(f)
-        meta_idx_block_size = read_varint(f)
-        print(f"Meta index block location: {meta_idx_block_loc}, size: {meta_idx_block_size}")
+        meta_idx_block_handle = BlockHandle.read(f)
+        print(f"Meta index block handle: {meta_idx_block_handle}")
 
-        idx_block_loc = read_varint(f)
-        idx_block_size = read_varint(f)
-        print(f"Index block location: {idx_block_loc}, size: {idx_block_size}")
+        idx_block_handle = BlockHandle.read(f)
+        print(f"Index block handle: {idx_block_handle}")
 
         print("Reading index block")
-        read_ldb_block(f, idx_block_loc, idx_block_size)
+        read_ldb_block(f, idx_block_handle, True)
 
         print("Reading meta index block")
-        read_ldb_block(f, meta_idx_block_loc, meta_idx_block_size)
+        read_ldb_block(f, meta_idx_block_handle)
 
         f.seek(0)
 
